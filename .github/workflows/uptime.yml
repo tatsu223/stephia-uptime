@@ -2,11 +2,17 @@ name: uptime-check
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # 毎時0分は GitHub 側が混雑して遅延・破棄されやすいためずらす
+    - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch:
 
 permissions:
   issues: write
+
+# 手動実行と定刻実行が重なっても Issue を二重作成しない
+concurrency:
+  group: uptime-check
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -19,43 +25,56 @@ jobs:
         run: |
           set -u
           sites="https://master.stephia.co https://dashboard.stephia.co https://members.stephia.co"
-          failed=""
-          for url in $sites; do
-            ok=0
-            code="000"
+
+          probe() {
+            code=""
             for i in 1 2 3; do
-              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -L "$url" || echo 000)
-              case "$code" in
-                2*|3*) ok=1; break ;;
-              esac
-              sleep 10
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -L "$1") || code="000"
+              case "$code" in 2*|3*) return 0 ;; esac
+              [ "$i" -lt 3 ] && sleep 10
             done
-            if [ "$ok" = "0" ]; then
-              failed="$failed $url (HTTP $code)"
+            return 1
+          }
+
+          failed=""; fail_count=0
+          for url in $sites; do
+            if ! probe "$url"; then
+              failed="$failed $url (HTTP ${code})"
+              fail_count=$((fail_count + 1))
             fi
           done
 
-          existing=$(gh api "repos/$REPO/issues?state=open&labels=incident" --jq '.[0].number // empty' 2>/dev/null || true)
+          # 全滅時はランナー側の回線異常を疑う。照合先にも届かなければ Issue を作らず失敗で終える
+          if [ "$fail_count" = "3" ]; then
+            if ! curl -s -o /dev/null --max-time 10 https://api.github.com; then
+              echo "ランナー側の回線異常の疑い。Issue は作らない:$failed"
+              exit 1
+            fi
+          fi
+
+          # Issue 一覧の取得失敗を「Issue なし」と誤認しない（誤認すると重複作成する）
+          if ! existing_json=$(gh api "repos/$REPO/issues?state=open&labels=incident" --jq '[.[] | select(.pull_request == null) | .number]'); then
+            echo "Issue 一覧の取得に失敗。誤作成を避けて失敗で終える"
+            exit 1
+          fi
+          first=$(echo "$existing_json" | jq -r '.[0] // empty')
           now=$(date -u '+%Y-%m-%d %H:%M UTC')
 
           if [ -n "$failed" ]; then
-            if [ -z "$existing" ]; then
-              body=$'外部監視（GitHub Actions・10分間隔）が応答異常を検知しました。\n\n対象:'"$failed"$'\n検知時刻: '"$now"$'\n\n母艦側の Uptime Kuma（60秒間隔）でも状況を確認してください。復旧を確認すると、この Issue は自動で閉じられます。'
+            if [ -z "$first" ]; then
+              body=$'外部監視（GitHub Actions・10分間隔）が応答異常を検知しました。\n\n対象:'"$failed"$'\n検知時刻: '"${now}"$'\n\n母艦側の Uptime Kuma（60秒間隔）でも状況を確認してください。全サイトの復旧を確認すると自動で閉じられます。\n（障害が続く間の追加コメントは出しません。実行失敗の通知が10分ごとの生存信号です）'
               gh api "repos/$REPO/issues" \
                 -f title="🔴 サイト応答異常:$failed" \
                 -f body="$body" \
                 -f "labels[]=incident"
-            else
-              gh api "repos/$REPO/issues/$existing/comments" \
-                -f body="継続中:$failed（$now）"
             fi
             echo "監視失敗:$failed"
             exit 1
           fi
 
-          if [ -n "$existing" ]; then
-            gh api "repos/$REPO/issues/$existing/comments" \
-              -f body="✅ 全サイトの復旧を確認（$now）"
-            gh api -X PATCH "repos/$REPO/issues/$existing" -f state=closed
-          fi
-          echo "全サイト正常（$now）"
+          # 復旧：開いている incident をすべて閉じる（複数あっても取り残さない）
+          for n in $(echo "$existing_json" | jq -r '.[]'); do
+            gh api "repos/$REPO/issues/$n/comments" -f body="✅ 全サイトの復旧を確認（${now}）"
+            gh api -X PATCH "repos/$REPO/issues/$n" -f state=closed
+          done
+          echo "全サイト正常（${now}）"
