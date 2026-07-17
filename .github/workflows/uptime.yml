@@ -40,14 +40,10 @@ jobs:
 
           if [ -n "$failed" ]; then
             if [ -z "$existing" ]; then
+              body=$'外部監視（GitHub Actions・10分間隔）が応答異常を検知しました。\n\n対象:'"$failed"$'\n検知時刻: '"$now"$'\n\n母艦側の Uptime Kuma（60秒間隔）でも状況を確認してください。復旧を確認すると、この Issue は自動で閉じられます。'
               gh api "repos/$REPO/issues" \
                 -f title="🔴 サイト応答異常:$failed" \
-                -f body="外部監視（GitHub Actions・10分間隔）が応答異常を検知しました。
-
-対象:$failed
-検知時刻: $now
-
-母艦側の Uptime Kuma（60秒間隔）でも状況を確認してください。復旧を確認すると、この Issue は自動で閉じられます。" \
+                -f body="$body" \
                 -f "labels[]=incident"
             else
               gh api "repos/$REPO/issues/$existing/comments" \
