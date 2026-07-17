@@ -1,0 +1,65 @@
+name: uptime-check
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check sites
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -u
+          sites="https://master.stephia.co https://dashboard.stephia.co https://members.stephia.co"
+          failed=""
+          for url in $sites; do
+            ok=0
+            code="000"
+            for i in 1 2 3; do
+              code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -L "$url" || echo 000)
+              case "$code" in
+                2*|3*) ok=1; break ;;
+              esac
+              sleep 10
+            done
+            if [ "$ok" = "0" ]; then
+              failed="$failed $url (HTTP $code)"
+            fi
+          done
+
+          existing=$(gh api "repos/$REPO/issues?state=open&labels=incident" --jq '.[0].number // empty' 2>/dev/null || true)
+          now=$(date -u '+%Y-%m-%d %H:%M UTC')
+
+          if [ -n "$failed" ]; then
+            if [ -z "$existing" ]; then
+              gh api "repos/$REPO/issues" \
+                -f title="🔴 サイト応答異常:$failed" \
+                -f body="外部監視（GitHub Actions・10分間隔）が応答異常を検知しました。
+
+対象:$failed
+検知時刻: $now
+
+母艦側の Uptime Kuma（60秒間隔）でも状況を確認してください。復旧を確認すると、この Issue は自動で閉じられます。" \
+                -f "labels[]=incident"
+            else
+              gh api "repos/$REPO/issues/$existing/comments" \
+                -f body="継続中:$failed（$now）"
+            fi
+            echo "監視失敗:$failed"
+            exit 1
+          fi
+
+          if [ -n "$existing" ]; then
+            gh api "repos/$REPO/issues/$existing/comments" \
+              -f body="✅ 全サイトの復旧を確認（$now）"
+            gh api -X PATCH "repos/$REPO/issues/$existing" -f state=closed
+          fi
+          echo "全サイト正常（$now）"
