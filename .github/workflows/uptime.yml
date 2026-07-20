@@ -52,9 +52,23 @@ jobs:
             fi
           fi
 
-          # Issue 一覧の取得失敗を「Issue なし」と誤認しない（誤認すると重複作成する）
-          if ! existing_json=$(gh api "repos/$REPO/issues?state=open&labels=incident" --jq '[.[] | select(.pull_request == null) | .number]'); then
-            echo "Issue 一覧の取得に失敗。誤作成を避けて失敗で終える"
+          # GitHub API の一時的な 5xx で監視全体を赤くしないよう、間隔を空けて再試行する
+          existing_json=""
+          issue_api_ok=false
+          for i in 1 2 3; do
+            if existing_json=$(gh api "repos/$REPO/issues?state=open&labels=incident" --jq '[.[] | select(.pull_request == null) | .number]'); then
+              issue_api_ok=true
+              break
+            fi
+            [ "$i" -lt 3 ] && sleep $((i * 5))
+          done
+
+          if [ "$issue_api_ok" != true ]; then
+            if [ -z "$failed" ]; then
+              echo "::warning::サイトは正常ですが、GitHub Issue 一覧を取得できませんでした。次回の定期実行で再確認します"
+              exit 0
+            fi
+            echo "サイト異常を検知しましたが、Issue 一覧を取得できませんでした。重複作成を避けて失敗で終えます:$failed"
             exit 1
           fi
           first=$(echo "$existing_json" | jq -r '.[0] // empty')
