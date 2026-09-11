@@ -1,0 +1,38 @@
+name: keepalive
+
+# 公開リポジトリは60日間更新が無いと定刻実行が自動停止する（GitHub 仕様）。
+# 週1回、有効化の API を叩いて停止までの数え直しを起こす。空コミットは作らない。
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-enable scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -eu
+          # 監視本体と、この keepalive 自身の両方を数え直す
+          for wf in uptime.yml keepalive.yml; do
+            ok=false
+            for i in 1 2 3; do
+              if gh api -X PUT "repos/$REPO/actions/workflows/$wf/enable"; then
+                ok=true
+                break
+              fi
+              [ "$i" -lt 3 ] && sleep $((i * 5))
+            done
+            if [ "$ok" != true ]; then
+              echo "有効化の API が通りませんでした: $wf"
+              exit 1
+            fi
+            echo "有効化を更新: $wf"
+          done
